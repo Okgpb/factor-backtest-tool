@@ -1,0 +1,19 @@
+{
+  "source": "deterministic synthetic fixture",
+  "seed": 20261026,
+  "factor_column": "momentum_factor",
+  "frequencies": {
+    "1h": {
+      "bars": 8640,
+      "factors": 8556,
+      "funding": 1080,
+      "universe": 8640
+    },
+    "4h": {
+      "bars": 2160,
+      "factors": 2076,
+      "funding": 1080,
+      "universe": 2160
+    }
+  }
+}

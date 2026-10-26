@@ -1,0 +1,24 @@
+quantSkills:
+  organization: Okgpb
+  repository: factor-backtest-tool
+  repository_url: https://github.com/Okgpb/factor-backtest-tool
+  project_type: skill
+  collection: factor-tools
+  category: tooling
+  tags:
+    - crypto
+    - perpetual-futures
+    - factor-backtest
+    - cross-sectional
+    - long-short
+    - funding-rate
+  platforms:
+    - opencode
+    - codex
+    - claude-code
+    - cursor
+  language: zh-en
+  status: draft
+  validation_level: runnable
+  summary_zh: 对 USDT 永续合约因子执行多周期横截面多空回测。
+  summary_en: Run multi-timeframe cross-sectional long-short factor backtests on USDT perpetual futures.

@@ -1,0 +1,33 @@
+factor_column: momentum_factor
+reverse: false
+frequencies:
+  - 1h
+  - 4h
+
+portfolio:
+  long_quantile: 0.20
+  short_quantile: 0.20
+  groups: 5
+  gross_exposure: 1.0
+  min_assets: 8
+  rebalance_every: 1
+
+execution:
+  delay_bars: 1
+  fee_bps: 4.0
+  slippage_bps: 2.0
+  include_funding: true
+
+universe:
+  min_history_bars: 24
+  min_quote_volume: 0.0
+  liquidity_lookback: 24
+
+analysis:
+  ic_horizons:
+    - 1
+    - 2
+    - 4
+    - 8
+    - 24
+  benchmark_symbol: BTCUSDT
