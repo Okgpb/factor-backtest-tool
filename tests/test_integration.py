@@ -22,3 +22,9 @@ def test_cli_fixture_pipeline(tmp_path: Path) -> None:
     output = Path(payload["output_dir"])
     for relative in payload["expected_outputs"]:
         assert (output / relative).exists(), relative
+    original_summary = (output / "run_summary.json").read_bytes()
+    repeated = subprocess.run(command, cwd=ROOT, text=True, capture_output=True, check=False)
+    assert repeated.returncode == 2
+    assert "Output directory must be empty" in repeated.stderr
+    assert not repeated.stdout
+    assert (output / "run_summary.json").read_bytes() == original_summary

@@ -31,6 +31,8 @@ def run_batch(
     config.validate()
     for frequency in config.frequencies:
         frequency_seconds(frequency)
+    if output_dir.exists() and (not output_dir.is_dir() or any(output_dir.iterdir())):
+        raise ValueError(f"Output directory must be empty or not yet exist: {output_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
     results: list[BacktestResult] = []
     reports: dict[str, str] = {}

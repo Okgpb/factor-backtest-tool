@@ -36,15 +36,23 @@ def _overrides(pairs: list[str]) -> dict[str, Any]:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run multi-timeframe crypto perpetual factor backtests.")
     parser.add_argument("--config", type=Path, help="YAML configuration file.")
-    parser.add_argument("--data-root", type=Path, help="Market data root containing one directory per frequency.")
-    parser.add_argument("--factor-root", type=Path, help="Directory containing <frequency>.parquet factor files.")
+    parser.add_argument(
+        "--data-root", type=Path, help="Market data root containing one directory per frequency."
+    )
+    parser.add_argument(
+        "--factor-root", type=Path, help="Directory containing <frequency>.parquet factor files."
+    )
     parser.add_argument("--factor-column", help="Numeric factor column.")
     parser.add_argument("--reverse", action="store_true", help="Treat lower factor values as better.")
     parser.add_argument("--frequencies", nargs="+", help="Frequencies to run, such as 1h 4h 1d.")
     parser.add_argument("--start", help="Optional inclusive UTC start timestamp.")
     parser.add_argument("--end", help="Optional inclusive UTC end timestamp.")
-    parser.add_argument("--output-dir", type=Path)
-    parser.add_argument("--override", action="append", default=[], help="Config override, e.g. execution.fee_bps=5.")
+    parser.add_argument(
+        "--output-dir", type=Path, help="New or empty directory; default: ./output/run_<UTC>."
+    )
+    parser.add_argument(
+        "--override", action="append", default=[], help="Config override, e.g. execution.fee_bps=5."
+    )
     parser.add_argument("--test-data", action="store_true", help="Use the checked-in deterministic fixture.")
     return parser
 
@@ -78,11 +86,11 @@ def main(argv: list[str] | None = None) -> int:
             data_root, factor_root = args.data_root, args.factor_root
         if not data_root.exists() or not factor_root.exists():
             raise FileNotFoundError(f"Data or factor root does not exist: {data_root}, {factor_root}")
-        output_dir = (args.output_dir or default_output_dir(PROJECT_ROOT / "output")).resolve()
+        output_dir = (args.output_dir or default_output_dir(Path.cwd() / "output")).resolve()
         summary = run_batch(config, data_root.resolve(), factor_root.resolve(), output_dir)
         print(json.dumps(summary, ensure_ascii=False, indent=2))
         return 0
-    except (FileNotFoundError, RuntimeError, ValueError) as exc:
+    except (OSError, RuntimeError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
 

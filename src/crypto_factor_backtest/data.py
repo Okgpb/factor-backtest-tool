@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from numbers import Number
 from pathlib import Path
 
 import numpy as np
@@ -44,7 +45,18 @@ def _find_table(root: Path, names: list[str], *, required: bool) -> Path | None:
 
 
 def _utc(series: pd.Series, label: str) -> pd.Series:
-    parsed = pd.to_datetime(series, utc=True, errors="coerce")
+    if not series.empty and (
+        pd.api.types.is_numeric_dtype(series.dtype)
+        or (
+            not pd.api.types.is_datetime64_any_dtype(series.dtype)
+            and series.map(lambda value: isinstance(value, Number)).any()
+        )
+    ):
+        raise ValueError(f"{label} contains numeric epoch timestamps; convert with an explicit unit first")
+    # pandas 2 introduced strict whole-column format inference and the explicit
+    # mixed-format option. pandas 1.5 already parses mixed ISO strings by default.
+    format_hint = "mixed" if int(pd.__version__.split(".")[0]) >= 2 else None
+    parsed = pd.to_datetime(series, utc=True, errors="coerce", format=format_hint)
     if parsed.isna().any():
         examples = series[parsed.isna()].head(3).tolist()
         raise ValueError(f"{label} contains invalid timestamps, examples: {examples}")
@@ -52,6 +64,8 @@ def _utc(series: pd.Series, label: str) -> pd.Series:
 
 
 def _symbols(series: pd.Series, label: str) -> pd.Series:
+    if series.empty:
+        return series.astype(str)
     if series.isna().any() or not series.map(lambda value: isinstance(value, str)).all():
         raise ValueError(f"{label} must contain non-empty symbol strings")
     symbols = series.str.strip().str.upper()
@@ -93,10 +107,10 @@ def _normalise_factors(frame: pd.DataFrame, factor_column: str) -> pd.DataFrame:
     frame = frame[["timestamp", "symbol", factor_column]].copy()
     frame["timestamp"] = _utc(frame["timestamp"], "factors.timestamp")
     frame["symbol"] = _symbols(frame["symbol"], "factors.symbol")
-    frame[factor_column] = pd.to_numeric(frame[factor_column], errors="coerce")
-    frame = frame.replace([np.inf, -np.inf], np.nan).dropna(subset=[factor_column])
     if frame.duplicated(["timestamp", "symbol"]).any():
         raise ValueError("factor data contains duplicate (timestamp, symbol) rows")
+    frame[factor_column] = pd.to_numeric(frame[factor_column], errors="coerce")
+    frame = frame.replace([np.inf, -np.inf], np.nan).dropna(subset=[factor_column])
     return frame.sort_values(["timestamp", "symbol"]).reset_index(drop=True)
 
 
@@ -204,6 +218,10 @@ def load_frequency_data(
         warnings.append(f"Ignored {len(missing_factor_symbols)} factor symbols without market data")
     if funding.empty:
         warnings.append("No funding data found; funding contribution is set to zero")
-    if universe.empty:
+    if universe_path is None:
         warnings.append("No point-in-time universe file found; survivorship bias may be present")
+    elif universe.empty:
+        warnings.append(
+            "Point-in-time universe has no observations in or before this window; all symbols are ineligible"
+        )
     return FrequencyData(bars=bars, factors=factors, funding=funding, universe=universe, warnings=warnings)

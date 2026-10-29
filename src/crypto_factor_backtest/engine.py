@@ -62,7 +62,9 @@ def _universe_panel(
     symbols: list[str],
 ) -> pd.DataFrame:
     if universe.empty:
-        return pd.DataFrame(True, index=index, columns=symbols)
+        # An absent optional file has no schema; a supplied empty state table
+        # retains its columns and means no symbol has known membership yet.
+        return pd.DataFrame("tradable" not in universe.columns, index=index, columns=symbols)
     values = universe.pivot(index="timestamp", columns="symbol", values="tradable")
     timeline = values.index.union(index).sort_values()
     return (
@@ -278,7 +280,13 @@ def run_backtest(data: FrequencyData, config: BacktestConfig, frequency: str) ->
     benchmark_bars = data.bars[data.bars["symbol"].eq(benchmark_symbol)]
     if not benchmark_bars.empty:
         benchmark_close = benchmark_bars.set_index("timestamp")["close"].reindex(bar_index)
-        benchmark_return = benchmark_close.pct_change(fill_method=None).fillna(0.0)
+        missing_benchmark = int(benchmark_close.isna().sum())
+        if missing_benchmark:
+            warnings.append(
+                f"Benchmark {benchmark_symbol} is missing {missing_benchmark} bar(s); "
+                "valued at the last known close until the next observation; starts at its first observed close"
+            )
+        benchmark_return = benchmark_close.ffill().pct_change(fill_method=None).fillna(0.0)
     else:
         benchmark_return = pd.Series(0.0, index=bar_index)
         warnings.append(f"Benchmark {benchmark_symbol} not found; benchmark return is set to zero")

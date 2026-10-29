@@ -3,6 +3,10 @@
 All timestamps must be parseable as timezone-aware UTC values. Symbols are uppercase strings such
 as `BTCUSDT`; they are never converted to integers.
 
+Datetime columns and ISO strings with mixed fractional-second precision or UTC offsets are accepted.
+Numeric epoch timestamps require explicit conversion before loading, for example
+`pd.to_datetime(values, unit="ms", utc=True)`; the loader never guesses seconds versus milliseconds.
+
 ## Layout
 
 ```text
@@ -68,6 +72,8 @@ keys. `tradable` accepts booleans, numeric 0/1, or strings true/false, yes/no, 1
 rejected. Updates may fall between bar timestamps. The last known state is carried forward,
 including updates before the requested start date. A symbol is ineligible until its first observation.
 Without this file, the engine uses available bars and emits a survivorship-bias warning.
+An existing universe file with no state at or before the window leaves all symbols ineligible,
+including when date filtering removes every row. It never enables unrestricted trading.
 
 ## Costs and returns
 

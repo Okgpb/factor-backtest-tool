@@ -108,6 +108,9 @@ python -m pytest
 最后一条交易池状态。详细计算口径见 [`references/backtest-methodology.md`](references/backtest-methodology.md)，
 本次审查记录见 [`references/code-review.md`](references/code-review.md)。
 
+默认输出目录位于当前工作目录的 `output/` 下。显式指定的 `--output-dir` 必须不存在或为空，
+避免重复运行时混合新旧报告；再次运行请使用新的目录。
+
 ## License
 
 MIT

@@ -46,4 +46,7 @@ restarts history/liquidity warm-up within the requested window while preserving 
 universe state before the start date. See the [methodology](references/backtest-methodology.md)
 and [code review record](references/code-review.md) for details.
 
+Default outputs are written under `./output/` in the current working directory. An explicit
+`--output-dir` must be new or empty; use a different directory for another run to keep results separate.
+
 Licensed under MIT.

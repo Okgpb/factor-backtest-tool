@@ -21,6 +21,8 @@ Quantile membership is determined from eligible factors at signal time, before o
 return availability. Missing future returns are excluded from group means without reassigning other
 assets. Group curves use the first configured IC horizon. When that horizon exceeds one bar,
 forward returns overlap; their cumulative curve is descriptive and is not an executable portfolio NAV.
+For rank `k` among `n` assets, the group is `ceil(k * groups / n)`, computed with integer-valued
+arithmetic so floating-point percentage ranks cannot move boundary assets into the next group.
 
 Bars must form a regular grid at the requested frequency. A missing entire bar raises an error rather
 than silently compressing execution delays, horizons and annualization. Missing open/close prices
@@ -51,6 +53,9 @@ is measured against those drifted pre-trade weights rather than the previous tar
 The benchmark uses market data independently of factor coverage; BTC does not need a factor to
 serve as a benchmark. Drawdown includes the initial NAV of 1.0. Sortino uses zero as the minimum
 acceptable return and downside deviation `sqrt(mean(min(net_return, 0)^2))` over all periods.
+Missing benchmark bars retain the last known close until the next quote, when the full intervening
+price change is recognized. The benchmark starts at its first observed close and the report warns
+about incomplete coverage; no future prices are backfilled into earlier timestamps.
 
 ## Limitations
 

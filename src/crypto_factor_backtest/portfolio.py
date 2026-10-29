@@ -38,9 +38,12 @@ def calculate_group_returns(
     signals = factors.where(eligible.reindex_like(factors).fillna(False)).replace([np.inf, -np.inf], np.nan)
     # Form groups using information available at signal time. A missing future
     # return must never move another asset to a different quantile.
-    rank = signals.rank(axis=1, method="first", pct=True)
-    assignments = np.ceil(rank * groups).clip(upper=groups)
-    assignments = assignments.where(signals.notna().sum(axis=1) >= groups, axis=0)
+    count = signals.notna().sum(axis=1)
+    rank = signals.rank(axis=1, method="first")
+    # Integer-valued arithmetic computes ceil(rank * groups / count) without
+    # percentage rounding pushing exact boundaries into the following group.
+    assignments = (rank * groups).add(count - 1, axis=0).floordiv(count.where(count > 0), axis=0)
+    assignments = assignments.where(count >= groups, axis=0)
     returns = pd.DataFrame(
         {
             f"group_{group}": forward_returns.where(assignments.eq(group)).mean(axis=1)
