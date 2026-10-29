@@ -74,7 +74,7 @@ def _charts(result: BacktestResult, output_dir: Path) -> dict[str, str]:
     if not result.group_returns.empty:
         fig, ax = plt.subplots(figsize=(10, 4.5))
         (1.0 + result.group_returns.fillna(0.0)).cumprod().plot(ax=ax, cmap="coolwarm")
-        ax.set_title("Quantile NAV")
+        ax.set_title(f"Quantile cumulative forward returns — {result.ic_series.columns[0]} horizon")
         ax.grid(alpha=0.25)
         images["groups"] = _save_figure(fig, output_dir / "group_returns.png")
     return images

@@ -10,7 +10,6 @@ from typing import Any
 from .config import apply_overrides, load_config
 from .runner import default_output_dir, run_batch
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 

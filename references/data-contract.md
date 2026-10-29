@@ -37,6 +37,11 @@ Keys `(timestamp, symbol)` must be unique. A signal stamped at time `t` is assum
 after that bar closes. With the mandatory default delay of one bar, it is first applied to the
 `open → close` return of bar `t+1`.
 
+OHLCV values must be finite, prices positive, and volumes non-negative. High/low must bound both
+open and close. Symbols must be non-empty strings; whitespace is stripped and letters uppercased.
+The combined bar timeline must be regularly spaced at the requested frequency. Missing prices for
+held or targeted assets are errors rather than zero-return assumptions.
+
 ## Factors
 
 Required columns are `timestamp`, `symbol`, and the configured factor column. Higher factor values
@@ -53,16 +58,22 @@ values are discarded.
 
 Events are assigned to the first bar ending at or after the settlement time. The portfolio funding
 return is `-sum(signed_weight * funding_rate)`: a long pays a positive rate and a short receives it.
+Keys `(funding_time, symbol)` must be unique and rates finite. Nanosecond, microsecond and
+millisecond datetime storage resolutions are supported without changing event placement.
 
 ## Point-in-time universe
 
-Optional columns are `timestamp`, `symbol`, `tradable`. State is forward-filled after the first
-observation. Without this file, the engine uses available bars and emits a survivorship-bias warning.
+The optional universe file requires `timestamp`, `symbol`, `tradable`, with unique `(timestamp, symbol)`
+keys. `tradable` accepts booleans, numeric 0/1, or strings true/false, yes/no, 1/0; missing values are
+rejected. Updates may fall between bar timestamps. The last known state is carried forward,
+including updates before the requested start date. A symbol is ineligible until its first observation.
+Without this file, the engine uses available bars and emits a survivorship-bias warning.
 
 ## Costs and returns
 
 - Target weights are shifted by at least one bar.
-- Turnover is `sum(abs(current_weight - previous_weight))`.
+- Turnover is `sum(abs(target_weight - drifted_pretrade_weight))` at scheduled rebalances and zero otherwise.
 - Fee and slippage costs are one-way bps multiplied by turnover.
 - Default gross exposure is 1.0: long weights sum to `+0.5`, short weights to `-0.5`.
 - Annualization uses a 365-day, 24-hour market rather than 252 equity trading days.
+- Frequencies use lowercase fixed-duration units `m`, `h`, `d`, `w`; calendar-month `1M` is rejected.

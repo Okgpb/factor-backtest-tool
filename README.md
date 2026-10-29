@@ -95,6 +95,19 @@ output/run_.../
 这是向量化因子研究工具，不模拟订单簿、部分成交、保证金档位、强平和 ADL。任何实盘策略都应
 在事件驱动撮合与风险系统中再次验证。本项目不构成投资建议。
 
+## 开发与验证
+
+```bash
+python -m pip install -e ".[dev]"
+python -m ruff check .
+python -m pytest
+```
+
+配置中的布尔值、整数和有限数值会严格校验。行情必须按指定周期连续排列；持仓或目标仓位缺少
+开盘/收盘价格时会明确报错。`--start` 之后重新预热历史与流动性窗口，但会保留起始日之前的
+最后一条交易池状态。详细计算口径见 [`references/backtest-methodology.md`](references/backtest-methodology.md)，
+本次审查记录见 [`references/code-review.md`](references/code-review.md)。
+
 ## License
 
 MIT

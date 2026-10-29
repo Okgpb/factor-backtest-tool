@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import math
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+from .timeutils import frequency_seconds, utc_timestamp
 
 
 @dataclass(slots=True)
@@ -54,10 +57,42 @@ class BacktestConfig:
         p = self.portfolio
         e = self.execution
         u = self.universe
-        if not self.factor_column:
+        if not isinstance(self.factor_column, str) or not self.factor_column.strip():
             raise ValueError("factor_column cannot be empty")
-        if not self.frequencies or len(set(self.frequencies)) != len(self.frequencies):
+        if self.factor_column in {"timestamp", "symbol"}:
+            raise ValueError("factor_column cannot be timestamp or symbol")
+        if not isinstance(self.frequencies, list) or not self.frequencies:
             raise ValueError("frequencies must be a non-empty list without duplicates")
+        for frequency in self.frequencies:
+            frequency_seconds(frequency)
+        if len({frequency_seconds(f) for f in self.frequencies}) != len(self.frequencies):
+            raise ValueError("frequencies must be a non-empty list without duplicates")
+        for label, value in {
+            "reverse": self.reverse,
+            "execution.include_funding": e.include_funding,
+        }.items():
+            if not isinstance(value, bool):
+                raise ValueError(f"{label} must be a boolean")
+        for label, value in {
+            "portfolio.groups": p.groups,
+            "portfolio.min_assets": p.min_assets,
+            "portfolio.rebalance_every": p.rebalance_every,
+            "execution.delay_bars": e.delay_bars,
+            "universe.min_history_bars": u.min_history_bars,
+            "universe.liquidity_lookback": u.liquidity_lookback,
+        }.items():
+            if type(value) is not int:
+                raise ValueError(f"{label} must be an integer")
+        for label, value in {
+            "portfolio.long_quantile": p.long_quantile,
+            "portfolio.short_quantile": p.short_quantile,
+            "portfolio.gross_exposure": p.gross_exposure,
+            "execution.fee_bps": e.fee_bps,
+            "execution.slippage_bps": e.slippage_bps,
+            "universe.min_quote_volume": u.min_quote_volume,
+        }.items():
+            if type(value) not in (int, float) or not math.isfinite(value):
+                raise ValueError(f"{label} must be a finite number")
         if not 0 < p.long_quantile < 1 or not 0 < p.short_quantile < 1:
             raise ValueError("long_quantile and short_quantile must be between 0 and 1")
         if p.long_quantile + p.short_quantile > 1:
@@ -72,8 +107,22 @@ class BacktestConfig:
             raise ValueError("fee_bps and slippage_bps cannot be negative")
         if u.min_history_bars < 1 or u.liquidity_lookback < 1:
             raise ValueError("universe lookbacks must be positive")
-        if any(h < 1 for h in self.analysis.ic_horizons):
-            raise ValueError("all IC horizons must be positive")
+        if u.min_quote_volume < 0:
+            raise ValueError("universe.min_quote_volume cannot be negative")
+        horizons = self.analysis.ic_horizons
+        if (
+            not isinstance(horizons, list)
+            or not horizons
+            or any(type(h) is not int or h < 1 for h in horizons)
+            or len(set(horizons)) != len(horizons)
+        ):
+            raise ValueError("IC horizons must be a non-empty list of distinct positive integers")
+        if not isinstance(self.analysis.benchmark_symbol, str) or not self.analysis.benchmark_symbol.strip():
+            raise ValueError("benchmark_symbol must be a non-empty string")
+        start = utc_timestamp(self.start) if self.start is not None else None
+        end = utc_timestamp(self.end) if self.end is not None else None
+        if start is not None and end is not None and start > end:
+            raise ValueError("end must be at or after start")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -85,12 +134,24 @@ def _build_config(raw: dict[str, Any]) -> BacktestConfig:
     unknown = set(raw) - allowed
     if unknown:
         raise ValueError(f"Unknown top-level config keys: {sorted(unknown)}")
+    sections = {
+        "portfolio": PortfolioConfig,
+        "execution": ExecutionConfig,
+        "universe": UniverseConfig,
+        "analysis": AnalysisConfig,
+    }
+    built = {}
+    for name, constructor in sections.items():
+        values = raw.get(name, {})
+        if not isinstance(values, dict):
+            raise ValueError(f"{name} config must be a mapping")
+        try:
+            built[name] = constructor(**values)
+        except TypeError as exc:
+            raise ValueError(f"Invalid {name} config: {exc}") from exc
     cfg = BacktestConfig(
         **{k: raw[k] for k in known if k in raw},
-        portfolio=PortfolioConfig(**raw.get("portfolio", {})),
-        execution=ExecutionConfig(**raw.get("execution", {})),
-        universe=UniverseConfig(**raw.get("universe", {})),
-        analysis=AnalysisConfig(**raw.get("analysis", {})),
+        **built,
     )
     cfg.validate()
     return cfg
@@ -101,7 +162,12 @@ def load_config(path: Path | None = None) -> BacktestConfig:
         cfg = BacktestConfig()
         cfg.validate()
         return cfg
-    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        raise ValueError(f"Invalid YAML config: {path}: {exc}") from exc
+    if raw is None:
+        raw = {}
     if not isinstance(raw, dict):
         raise ValueError(f"Config must contain a YAML mapping: {path}")
     return _build_config(raw)

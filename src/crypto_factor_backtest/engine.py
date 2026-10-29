@@ -10,6 +10,7 @@ from .config import BacktestConfig
 from .data import FrequencyData
 from .metrics import ic_summary, max_drawdown, performance_metrics
 from .portfolio import build_target_weights, calculate_group_returns
+from .timeutils import frequency_seconds
 
 
 @dataclass(slots=True)
@@ -42,10 +43,10 @@ def _funding_panel(
     result = pd.DataFrame(0.0, index=index, columns=symbols)
     if funding.empty:
         return result
-    index_values = index.view("i8")
-    event_values = pd.DatetimeIndex(funding["funding_time"]).view("i8")
-    locations = np.searchsorted(index_values, event_values, side="left")
-    valid = locations < len(index)
+    # Let pandas compare timestamps so ns/us/ms input resolutions cannot change
+    # event placement through mismatched raw integer units.
+    locations = index.get_indexer(pd.DatetimeIndex(funding["funding_time"]), method="backfill")
+    valid = locations >= 0
     mapped = funding.loc[valid, ["symbol", "funding_rate"]].copy()
     mapped["timestamp"] = index[locations[valid]]
     mapped = mapped[mapped["symbol"].isin(symbols)]
@@ -63,7 +64,15 @@ def _universe_panel(
     if universe.empty:
         return pd.DataFrame(True, index=index, columns=symbols)
     values = universe.pivot(index="timestamp", columns="symbol", values="tradable")
-    return values.reindex(index=index, columns=symbols).ffill().fillna(False).astype(bool)
+    timeline = values.index.union(index).sort_values()
+    return (
+        values.reindex(index=timeline, columns=symbols)
+        .astype("boolean")
+        .ffill()
+        .reindex(index)
+        .fillna(False)
+        .astype(bool)
+    )
 
 
 def _ic_series(
@@ -72,16 +81,20 @@ def _ic_series(
     close_price: pd.DataFrame,
     eligible: pd.DataFrame,
     horizons: list[int],
+    delay_bars: int = 1,
 ) -> tuple[pd.DataFrame, dict[int, pd.DataFrame]]:
     output: dict[str, pd.Series] = {}
     forward: dict[int, pd.DataFrame] = {}
     for horizon in horizons:
-        future = close_price.shift(-horizon) / open_price.shift(-1) - 1.0
+        future = close_price.shift(-(delay_bars + horizon - 1)) / open_price.shift(-delay_bars) - 1.0
         future = future.where(eligible)
         forward[horizon] = future
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)
-            output[f"{horizon}_bar"] = factors.rank(axis=1).corrwith(future.rank(axis=1), axis=1)
+            paired = factors.notna() & future.notna()
+            output[f"{horizon}_bar"] = (
+                factors.where(paired).rank(axis=1).corrwith(future.where(paired).rank(axis=1), axis=1)
+            )
     return pd.DataFrame(output), forward
 
 
@@ -126,6 +139,17 @@ def _simulate_portfolio(
     for row_number, timestamp in enumerate(index):
         opening = open_price.loc[timestamp]
         closing = close_price.loc[timestamp]
+        source_row = row_number - config.execution.delay_bars
+        scheduled = source_row >= 0 and source_row % config.portfolio.rebalance_every == 0
+        required = end_weights.ne(0)
+        if scheduled:
+            required |= targets.loc[timestamp].fillna(0.0).ne(0)
+        missing = required & (opening.isna() | closing.isna())
+        if missing.any():
+            raise ValueError(
+                f"Missing execution/valuation prices for held or targeted symbols at {timestamp}: "
+                f"{list(columns[missing])}"
+            )
         if previous_close is None:
             gap_asset_return = pd.Series(0.0, index=columns)
         else:
@@ -135,8 +159,6 @@ def _simulate_portfolio(
             raise RuntimeError(f"Portfolio equity became non-positive before rebalance at {timestamp}")
         pretrade = end_weights.mul(1.0 + gap_asset_return).div(1.0 + gap_return)
 
-        source_row = row_number - config.execution.delay_bars
-        scheduled = source_row >= 0 and source_row % config.portfolio.rebalance_every == 0
         if scheduled:
             active = targets.loc[timestamp].fillna(0.0)
             delta = active - pretrade
@@ -152,21 +174,15 @@ def _simulate_portfolio(
         intrabar_asset_return = (closing / opening - 1.0).replace([np.inf, -np.inf], np.nan).fillna(0.0)
         intrabar_return = float((active * intrabar_asset_return).sum())
         funding_return = (
-            -float((active * funding_rates.loc[timestamp]).sum())
-            if config.execution.include_funding
-            else 0.0
+            -float((active * funding_rates.loc[timestamp]).sum()) if config.execution.include_funding else 0.0
         )
         post_open_return = intrabar_return + funding_return - fee_return - slippage_return
         net_return = (1.0 + gap_return) * (1.0 + post_open_return) - 1.0
         gross_return = (1.0 + gap_return) * (1.0 + intrabar_return) - 1.0
         long_return = float((end_weights.clip(lower=0.0) * gap_asset_return).sum())
-        long_return += (1.0 + gap_return) * float(
-            (active.clip(lower=0.0) * intrabar_asset_return).sum()
-        )
+        long_return += (1.0 + gap_return) * float((active.clip(lower=0.0) * intrabar_asset_return).sum())
         short_return = float((end_weights.clip(upper=0.0) * gap_asset_return).sum())
-        short_return += (1.0 + gap_return) * float(
-            (active.clip(upper=0.0) * intrabar_asset_return).sum()
-        )
+        short_return += (1.0 + gap_return) * float((active.clip(upper=0.0) * intrabar_asset_return).sum())
         denominator = 1.0 + post_open_return
         if denominator <= 0:
             raise RuntimeError(f"Portfolio equity became non-positive during bar ending {timestamp}")
@@ -196,14 +212,25 @@ def _simulate_portfolio(
 
 def run_backtest(data: FrequencyData, config: BacktestConfig, frequency: str) -> BacktestResult:
     config.validate()
+    seconds = frequency_seconds(frequency)
     bar_index = pd.DatetimeIndex(sorted(data.bars["timestamp"].unique()))
+    if bar_index.empty:
+        raise ValueError("Cannot backtest empty bars")
+    if len(bar_index) > 1 and not (bar_index[1:] - bar_index[:-1] == pd.Timedelta(seconds=seconds)).all():
+        raise ValueError(f"Bar timestamps must form a regular {frequency} grid; gaps would distort horizons")
     symbols = sorted(set(data.bars["symbol"]) & set(data.factors["symbol"]))
+    if not symbols:
+        raise ValueError("No common symbols between bars and factors")
     open_price = _panel(data.bars, "open", bar_index, symbols)
     close_price = _panel(data.bars, "close", bar_index, symbols)
     quote_volume = _panel(data.bars, "quote_volume", bar_index, symbols)
-    factors = data.factors.pivot(index="timestamp", columns="symbol", values=config.factor_column).reindex(
-        index=bar_index, columns=symbols
+    factors = (
+        data.factors.pivot(index="timestamp", columns="symbol", values=config.factor_column)
+        .reindex(index=bar_index, columns=symbols)
+        .replace([np.inf, -np.inf], np.nan)
     )
+    if not factors.notna().any().any():
+        raise ValueError("No finite factors align with bar timestamps and symbols")
     if config.reverse:
         factors = -factors
 
@@ -222,6 +249,7 @@ def run_backtest(data: FrequencyData, config: BacktestConfig, frequency: str) ->
         close_price,
         eligible,
         config.analysis.ic_horizons,
+        config.execution.delay_bars,
     )
     group_returns = calculate_group_returns(
         factors,
@@ -232,12 +260,10 @@ def run_backtest(data: FrequencyData, config: BacktestConfig, frequency: str) ->
 
     signal_weights = build_target_weights(factors, eligible, config.portfolio)
     target_weights = signal_weights.shift(config.execution.delay_bars).fillna(0.0)
-    asset_returns = close_price / open_price - 1.0
-    unavailable = (target_weights.abs() > 0) & asset_returns.isna()
     warnings = list(data.warnings)
-    if unavailable.any().any():
+    if config.analysis.ic_horizons[0] > 1:
         warnings.append(
-            f"{int(unavailable.sum().sum())} held symbol-bars lacked returns and were valued at zero return"
+            "Group-return curves compound overlapping forward returns; they are descriptive, not portfolio NAV"
         )
     funding_rates = _funding_panel(data.funding, bar_index, symbols)
     stats, weights, trade_deltas = _simulate_portfolio(
@@ -248,9 +274,11 @@ def run_backtest(data: FrequencyData, config: BacktestConfig, frequency: str) ->
         config,
     )
 
-    benchmark_symbol = config.analysis.benchmark_symbol.upper()
-    if benchmark_symbol in open_price:
-        benchmark_return = close_price[benchmark_symbol].pct_change(fill_method=None).fillna(0.0)
+    benchmark_symbol = config.analysis.benchmark_symbol.strip().upper()
+    benchmark_bars = data.bars[data.bars["symbol"].eq(benchmark_symbol)]
+    if not benchmark_bars.empty:
+        benchmark_close = benchmark_bars.set_index("timestamp")["close"].reindex(bar_index)
+        benchmark_return = benchmark_close.pct_change(fill_method=None).fillna(0.0)
     else:
         benchmark_return = pd.Series(0.0, index=bar_index)
         warnings.append(f"Benchmark {benchmark_symbol} not found; benchmark return is set to zero")
@@ -262,7 +290,7 @@ def run_backtest(data: FrequencyData, config: BacktestConfig, frequency: str) ->
     metrics: dict[str, float | int | str] = performance_metrics(stats, frequency)
     metrics["frequency"] = frequency
     metrics["symbols"] = len(symbols)
-    metrics["mean_rank_ic_1"] = float(ic_series.iloc[:, 0].mean()) if not ic_series.empty else float("nan")
+    metrics["mean_rank_ic_1"] = float(ic_series["1_bar"].mean()) if "1_bar" in ic_series else float("nan")
 
     weights.index.name = "timestamp"
     trades = _trades_from_deltas(

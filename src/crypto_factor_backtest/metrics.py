@@ -9,7 +9,7 @@ from .timeutils import periods_per_year
 
 
 def max_drawdown(nav: pd.Series) -> tuple[float, pd.Series]:
-    drawdown = nav / nav.cummax() - 1.0
+    drawdown = nav / nav.cummax().clip(lower=1.0) - 1.0
     return float(drawdown.min()) if not drawdown.empty else float("nan"), drawdown
 
 
@@ -19,15 +19,19 @@ def performance_metrics(stats: pd.DataFrame, frequency: str) -> dict[str, float 
     ppy = periods_per_year(frequency)
     periods = len(returns)
     total_return = float(nav.iloc[-1] - 1.0) if not nav.empty else float("nan")
-    annual_return = float((nav.iloc[-1] ** (ppy / periods)) - 1.0) if periods and nav.iloc[-1] > 0 else float("nan")
+    annual_return = (
+        float(np.expm1(np.log(nav.iloc[-1]) * ppy / periods))
+        if periods and not nav.empty and nav.iloc[-1] > 0
+        else float("nan")
+    )
     annual_volatility = float(returns.std(ddof=1) * math.sqrt(ppy)) if periods > 1 else float("nan")
     sharpe = (
         float(returns.mean() / returns.std(ddof=1) * math.sqrt(ppy))
         if periods > 1 and returns.std(ddof=1) > 0
         else float("nan")
     )
-    downside = returns[returns < 0].std(ddof=1)
-    sortino = float(returns.mean() / downside * math.sqrt(ppy)) if downside and downside > 0 else float("nan")
+    downside = float(np.sqrt(returns.clip(upper=0.0).pow(2).mean()))
+    sortino = float(returns.mean() / downside * math.sqrt(ppy)) if downside > 0 else float("nan")
     mdd, _ = max_drawdown(nav)
     calmar = float(annual_return / abs(mdd)) if mdd < 0 and np.isfinite(annual_return) else float("nan")
     benchmark = stats.get("benchmark_return", pd.Series(index=stats.index, dtype=float)).fillna(0.0)

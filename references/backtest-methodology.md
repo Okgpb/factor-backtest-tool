@@ -13,7 +13,24 @@ point-in-time universe membership. Existing targets are carried between configur
 
 The factor timestamp is the bar close at which it becomes available. Target weights are shifted by
 `delay_bars`, whose minimum accepted value is one. The default return assigned to active weights is
-the next bar's open-to-close return. IC uses the next open as entry and a future close as exit.
+the next bar's open-to-close return. For delay `d` and horizon `h`, IC uses
+`close[t+d+h-1] / open[t+d] - 1`, matching the configured execution delay. Rank IC ranks only
+the common non-missing factor/forward-return pairs in each eligible cross-section.
+
+Quantile membership is determined from eligible factors at signal time, before observing future
+return availability. Missing future returns are excluded from group means without reassigning other
+assets. Group curves use the first configured IC horizon. When that horizon exceeds one bar,
+forward returns overlap; their cumulative curve is descriptive and is not an executable portfolio NAV.
+
+Bars must form a regular grid at the requested frequency. A missing entire bar raises an error rather
+than silently compressing execution delays, horizons and annualization. Missing open/close prices
+for held or targeted assets also raise an error; the engine cannot infer delisting settlement prices.
+Missing prices for assets with no position or target are allowed.
+
+`start` and `end` filter bars and factors inclusively. The portfolio starts flat and history/liquidity
+lookbacks warm up within that window. Universe state is the last update at or before each signal
+timestamp, including updates before `start` and between bar timestamps. State before a symbol's
+first observation is false; future updates never affect earlier signals.
 
 ## Attribution
 
@@ -30,6 +47,10 @@ net_return     = (1 + gap_return) * (1 + intrabar + funding - fees - slippage) -
 Outputs retain long-leg, short-leg, funding, fee and slippage contributions separately.
 Between rebalances, signed position weights drift with asset prices. At a scheduled rebalance, turnover
 is measured against those drifted pre-trade weights rather than the previous target weights.
+
+The benchmark uses market data independently of factor coverage; BTC does not need a factor to
+serve as a benchmark. Drawdown includes the initial NAV of 1.0. Sortino uses zero as the minimum
+acceptable return and downside deviation `sqrt(mean(min(net_return, 0)^2))` over all periods.
 
 ## Limitations
 

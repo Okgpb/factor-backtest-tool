@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -9,10 +10,12 @@ from typing import Any
 import pandas as pd
 import requests
 
-from .timeutils import frequency_seconds
-
+from .timeutils import utc_timestamp
 
 DEFAULT_BASE_URL = "https://fapi.binance.com"
+# Fixed-duration intervals supported by both Binance and this engine. Calendar
+# months are deliberately excluded because annualization requires a fixed period.
+BINANCE_INTERVALS = {"1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w"}
 KLINE_COLUMNS = [
     "open_time",
     "open",
@@ -39,16 +42,23 @@ class BinanceUSDMClient:
         last_error: Exception | None = None
         for attempt in range(5):
             try:
-                response = self.session.get(
-                    f"{self.base_url}{path}", params=params, timeout=self.timeout
-                )
+                response = self.session.get(f"{self.base_url}{path}", params=params, timeout=self.timeout)
                 if response.status_code in {418, 429}:
+                    last_error = RuntimeError(f"HTTP {response.status_code}: rate limited")
+                    if attempt == 4:
+                        break
                     delay = float(response.headers.get("Retry-After", 2 ** (attempt + 1)))
                     time.sleep(delay)
                     continue
                 response.raise_for_status()
                 return response.json()
             except (requests.RequestException, ValueError) as exc:
+                if (
+                    isinstance(exc, requests.HTTPError)
+                    and exc.response is not None
+                    and 400 <= exc.response.status_code < 500
+                ):
+                    raise
                 last_error = exc
                 if attempt == 4:
                     break
@@ -66,7 +76,8 @@ class BinanceUSDMClient:
         )
 
     def klines(self, symbol: str, interval: str, start_ms: int, end_ms: int) -> pd.DataFrame:
-        frequency_seconds(interval)
+        if interval not in BINANCE_INTERVALS:
+            raise ValueError(f"Unsupported Binance interval: {interval}")
         rows: list[list[Any]] = []
         cursor = start_ms
         while cursor <= end_ms:
@@ -120,14 +131,11 @@ class BinanceUSDMClient:
         frame["funding_time"] = pd.to_datetime(frame["fundingTime"], unit="ms", utc=True)
         frame["funding_rate"] = pd.to_numeric(frame["fundingRate"], errors="coerce")
         frame["symbol"] = symbol
-        return frame[["funding_time", "symbol", "funding_rate"]].drop_duplicates(
-            ["funding_time", "symbol"]
-        )
+        return frame[["funding_time", "symbol", "funding_rate"]].drop_duplicates(["funding_time", "symbol"])
 
 
 def _timestamp_ms(value: str) -> int:
-    timestamp = pd.Timestamp(value)
-    timestamp = timestamp.tz_localize("UTC") if timestamp.tzinfo is None else timestamp.tz_convert("UTC")
+    timestamp = utc_timestamp(value)
     return int(timestamp.timestamp() * 1000)
 
 
@@ -140,15 +148,36 @@ def download_dataset(
     *,
     base_url: str = DEFAULT_BASE_URL,
 ) -> dict[str, Any]:
+    start_ms, end_ms = _timestamp_ms(start), _timestamp_ms(end)
+    if end_ms <= start_ms:
+        raise ValueError("end must be later than start")
+    if not frequencies or len(set(frequencies)) != len(frequencies):
+        raise ValueError("frequencies must be non-empty and distinct")
+    for frequency in frequencies:
+        if frequency not in BINANCE_INTERVALS:
+            raise ValueError(f"Unsupported Binance interval: {frequency}")
     client = BinanceUSDMClient(base_url=base_url)
+    try:
+        return _download_dataset(client, output_root, symbols, frequencies, start, end, start_ms, end_ms)
+    finally:
+        client.session.close()
+
+
+def _download_dataset(
+    client: BinanceUSDMClient,
+    output_root: Path,
+    symbols: list[str],
+    frequencies: list[str],
+    start: str,
+    end: str,
+    start_ms: int,
+    end_ms: int,
+) -> dict[str, Any]:
     symbols = sorted({symbol.strip().upper() for symbol in symbols if symbol.strip()})
     if not symbols:
         symbols = client.active_usdt_perpetuals()
     if not symbols:
         raise ValueError("No symbols were supplied or returned by Binance")
-    start_ms, end_ms = _timestamp_ms(start), _timestamp_ms(end)
-    if end_ms <= start_ms:
-        raise ValueError("end must be later than start")
     all_funding = []
     for symbol in symbols:
         funding = client.funding_rates(symbol, start_ms, end_ms)
@@ -161,7 +190,6 @@ def download_dataset(
     )
     counts: dict[str, int] = {}
     for frequency in frequencies:
-        frequency_seconds(frequency)
         frames = []
         for symbol in symbols:
             bars = client.klines(symbol, frequency, start_ms, end_ms)
@@ -177,7 +205,7 @@ def download_dataset(
         counts[frequency] = len(bars_frame)
     manifest = {
         "source": "Binance USD-M Futures public REST API",
-        "base_url": base_url,
+        "base_url": client.base_url,
         "start": start,
         "end": end,
         "symbols": symbols,
@@ -207,11 +235,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     symbols = list(args.symbols)
-    if args.symbols_file:
-        symbols.extend(
-            line.strip() for line in args.symbols_file.read_text(encoding="utf-8").splitlines()
-        )
     try:
+        if args.symbols_file:
+            symbols.extend(
+                line.strip() for line in args.symbols_file.read_text(encoding="utf-8").splitlines()
+            )
         manifest = download_dataset(
             args.output_root.resolve(),
             symbols,
@@ -220,8 +248,8 @@ def main(argv: list[str] | None = None) -> int:
             args.end,
             base_url=args.base_url,
         )
-    except (RuntimeError, ValueError, requests.RequestException) as exc:
-        print(f"ERROR: {exc}")
+    except (OSError, RuntimeError, ValueError, requests.RequestException) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
         return 2
     print(json.dumps(manifest, ensure_ascii=False, indent=2))
     return 0

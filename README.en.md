@@ -32,4 +32,18 @@ Each frequency uses its own factor file. See
 This is a vectorized factor-screening engine. It does not simulate order books, partial fills,
 margin tiers or liquidation. Validate promising signals in an execution simulator before trading.
 
+## Development and validation
+
+```bash
+python -m pip install -e ".[dev]"
+python -m ruff check .
+python -m pytest
+```
+
+Configuration validates boolean/integer types and finite numeric values. The market timeline must
+be regularly spaced; held or targeted assets require execution and valuation prices. Date filtering
+restarts history/liquidity warm-up within the requested window while preserving the last known
+universe state before the start date. See the [methodology](references/backtest-methodology.md)
+and [code review record](references/code-review.md) for details.
+
 Licensed under MIT.

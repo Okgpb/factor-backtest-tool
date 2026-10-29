@@ -9,8 +9,7 @@ SRC = PROJECT_ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from crypto_factor_backtest.cli import main
-
+from crypto_factor_backtest.cli import main  # noqa: E402 -- bootstrap the source checkout
 
 if __name__ == "__main__":
     raise SystemExit(main())

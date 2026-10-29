@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from .timeutils import utc_timestamp
 
 BAR_COLUMNS = {"timestamp", "symbol", "open", "high", "low", "close", "volume", "quote_volume"}
 FACTOR_KEYS = {"timestamp", "symbol"}
@@ -50,6 +51,15 @@ def _utc(series: pd.Series, label: str) -> pd.Series:
     return parsed
 
 
+def _symbols(series: pd.Series, label: str) -> pd.Series:
+    if series.isna().any() or not series.map(lambda value: isinstance(value, str)).all():
+        raise ValueError(f"{label} must contain non-empty symbol strings")
+    symbols = series.str.strip().str.upper()
+    if symbols.eq("").any():
+        raise ValueError(f"{label} must contain non-empty symbol strings")
+    return symbols
+
+
 def _normalise_bars(frame: pd.DataFrame) -> pd.DataFrame:
     frame = frame.copy()
     if "timestamp" not in frame and "close_time" in frame:
@@ -58,13 +68,19 @@ def _normalise_bars(frame: pd.DataFrame) -> pd.DataFrame:
     if missing:
         raise ValueError(f"bars data is missing columns: {sorted(missing)}")
     frame["timestamp"] = _utc(frame["timestamp"], "bars.timestamp")
-    frame["symbol"] = frame["symbol"].astype(str).str.upper()
+    frame["symbol"] = _symbols(frame["symbol"], "bars.symbol")
     numeric = ["open", "high", "low", "close", "volume", "quote_volume"]
     frame[numeric] = frame[numeric].apply(pd.to_numeric, errors="coerce")
-    if frame[numeric].isna().any().any():
-        raise ValueError("bars data contains non-numeric or missing OHLCV values")
+    if not np.isfinite(frame[numeric].to_numpy(dtype=float)).all():
+        raise ValueError("bars data contains non-finite, non-numeric or missing OHLCV values")
     if (frame[["open", "high", "low", "close"]] <= 0).any().any():
         raise ValueError("bars data contains non-positive prices")
+    if (frame[["volume", "quote_volume"]] < 0).any().any():
+        raise ValueError("bars data contains negative volume")
+    if (frame["high"] < frame[["open", "low", "close"]].max(axis=1)).any() or (
+        frame["low"] > frame[["open", "high", "close"]].min(axis=1)
+    ).any():
+        raise ValueError("bars data contains inconsistent OHLC prices")
     if frame.duplicated(["timestamp", "symbol"]).any():
         raise ValueError("bars data contains duplicate (timestamp, symbol) rows")
     return frame.sort_values(["timestamp", "symbol"]).reset_index(drop=True)
@@ -76,7 +92,7 @@ def _normalise_factors(frame: pd.DataFrame, factor_column: str) -> pd.DataFrame:
         raise ValueError(f"factor data is missing columns: {sorted(missing)}")
     frame = frame[["timestamp", "symbol", factor_column]].copy()
     frame["timestamp"] = _utc(frame["timestamp"], "factors.timestamp")
-    frame["symbol"] = frame["symbol"].astype(str).str.upper()
+    frame["symbol"] = _symbols(frame["symbol"], "factors.symbol")
     frame[factor_column] = pd.to_numeric(frame[factor_column], errors="coerce")
     frame = frame.replace([np.inf, -np.inf], np.nan).dropna(subset=[factor_column])
     if frame.duplicated(["timestamp", "symbol"]).any():
@@ -90,9 +106,12 @@ def _normalise_funding(frame: pd.DataFrame) -> pd.DataFrame:
         raise ValueError(f"funding data is missing columns: {sorted(missing)}")
     frame = frame[["funding_time", "symbol", "funding_rate"]].copy()
     frame["funding_time"] = _utc(frame["funding_time"], "funding.funding_time")
-    frame["symbol"] = frame["symbol"].astype(str).str.upper()
+    frame["symbol"] = _symbols(frame["symbol"], "funding.symbol")
     frame["funding_rate"] = pd.to_numeric(frame["funding_rate"], errors="coerce")
-    frame = frame.dropna(subset=["funding_rate"])
+    if not np.isfinite(frame["funding_rate"].to_numpy(dtype=float)).all():
+        raise ValueError("funding data contains non-finite or invalid rates")
+    if frame.duplicated(["funding_time", "symbol"]).any():
+        raise ValueError("funding data contains duplicate (funding_time, symbol) rows")
     return frame.sort_values(["funding_time", "symbol"]).reset_index(drop=True)
 
 
@@ -103,10 +122,14 @@ def _normalise_universe(frame: pd.DataFrame) -> pd.DataFrame:
         raise ValueError(f"universe data is missing columns: {sorted(missing)}")
     frame = frame[["timestamp", "symbol", "tradable"]].copy()
     frame["timestamp"] = _utc(frame["timestamp"], "universe.timestamp")
-    frame["symbol"] = frame["symbol"].astype(str).str.upper()
+    frame["symbol"] = _symbols(frame["symbol"], "universe.symbol")
+    if frame["tradable"].isna().any():
+        raise ValueError("universe.tradable contains missing boolean values")
     if pd.api.types.is_bool_dtype(frame["tradable"]):
         frame["tradable"] = frame["tradable"].astype(bool)
     elif pd.api.types.is_numeric_dtype(frame["tradable"]):
+        if not frame["tradable"].isin([0, 1]).all():
+            raise ValueError("universe.tradable numeric values must be 0 or 1")
         frame["tradable"] = frame["tradable"].ne(0)
     else:
         values = frame["tradable"].astype(str).str.strip().str.lower()
@@ -146,21 +169,20 @@ def load_frequency_data(
     funding = _normalise_funding(read_table(funding_path)) if funding_path else pd.DataFrame()
     universe = _normalise_universe(read_table(universe_path)) if universe_path else pd.DataFrame()
 
-    def boundary(value: str | None) -> pd.Timestamp | None:
-        if value is None:
-            return None
-        timestamp = pd.Timestamp(value)
-        return timestamp.tz_localize("UTC") if timestamp.tzinfo is None else timestamp.tz_convert("UTC")
-
-    start_ts = boundary(start)
-    end_ts = boundary(end)
+    start_ts = utc_timestamp(start) if start is not None else None
+    end_ts = utc_timestamp(end) if end is not None else None
+    if start_ts is not None and end_ts is not None and start_ts > end_ts:
+        raise ValueError("end must be at or after start")
     if start_ts is not None:
         bars = bars[bars["timestamp"] >= start_ts]
         factors = factors[factors["timestamp"] >= start_ts]
         if not funding.empty:
             funding = funding[funding["funding_time"] >= start_ts]
+        # Universe rows are state updates: pre-start observations remain necessary
+        # to establish membership at the beginning of the requested window.
         if not universe.empty:
-            universe = universe[universe["timestamp"] >= start_ts]
+            prior = universe[universe["timestamp"] < start_ts].groupby("symbol", sort=False).tail(1)
+            universe = pd.concat([prior, universe[universe["timestamp"] >= start_ts]], ignore_index=True)
     if end_ts is not None:
         bars = bars[bars["timestamp"] <= end_ts]
         factors = factors[factors["timestamp"] <= end_ts]
